@@ -6,23 +6,22 @@ void SystemClock_Config(void);
 #define BUFFER_OVERFLOW_CONTROL 100 //Used to begin the overflow control
 #define BUFFER_SAFE_RANGE 50//Used to stop the overflow control
 
+volatile uint8_t counter = 0;
+volatile uint8_t mode;
 
 struct cicrularBuffer{
 	uint32_t getIndex;
 	uint32_t putIndex;
 	uint32_t nChars;
 	char data[BUFFER_SIZE];
-
-
 };
 
 volatile struct cicrularBuffer TXbuffer = {0,0,0,{}};
 volatile struct cicrularBuffer RXbuffer = {0,0,0,{}};
 UART_HandleTypeDef uartHandle;
 
-
 //-------LED Initialization-------
-void LED2_Init(){
+void LED2_Init(void){
 	LD2_GPIO_CLK_ENABLE();
 
 	GPIO_InitTypeDef LD2_Init;
@@ -36,9 +35,38 @@ void LED2_Init(){
 
 }
 
+//---------Button Initialization---------
+void Button_Init(void){
+	BUTTON_GPIO_CLK_ENABLE();
+
+	GPIO_InitTypeDef ButtonInit;
+	ButtonInit.Pin = USER_BUTTON_Pin;
+	ButtonInit.Mode = GPIO_MODE_INPUT;
+	ButtonInit.Pull = GPIO_NOPULL;
+	ButtonInit.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &ButtonInit);
+}
+
+void EXTI_Configuration(void){
+	__HAL_RCC_SYSCFG_CLK_ENABLE();
+
+	SYSCFG -> EXTICR[3] &= ~(SYSCFG_EXTICR4_EXTI13_Msk); //Clear the register 
+	SYSCFG -> EXTICR[3] |= SYSCFG_EXTICR4_EXTI13_PC; //Set the pin 13 on GPIOC
+
+	//Enable the interrupt mask register
+	EXTI -> IMR |= EXTI_IMR_MR13;
+	//Set the interrupt to detect the falling edge
+	EXTI -> FTSR |= EXTI_FTSR_TR13;
+
+	//Set interrupt priority and enable it 
+	NVIC_SetPriority(EXTI15_10_IRQn,0);
+	NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+	NVIC_EnableIRQ(EXTI15_10_IRQn);
+}
+
 
 //-----UART Initialization-----
-void UART2_Init(){
+void UART2_Init(void){
 
 	uartHandle.Instance = USART2;
 	uartHandle.Init.Mode = UART_MODE_TX_RX;
@@ -48,8 +76,8 @@ void UART2_Init(){
 	uartHandle.Init.Parity = UART_PARITY_NONE;
 	uartHandle.Init.HwFlowCtl = UART_HWCONTROL_NONE;
 	uartHandle.Init.StopBits = UART_STOPBITS_1;
-	
-	
+
+
 	//if UART fail to initialize, signal an error
 	if(HAL_UART_Init(&uartHandle) != HAL_OK) Error_Handler();
 
@@ -58,7 +86,7 @@ void UART2_Init(){
 
 
 //-------Signals an error by LED blinking--------
-void Error_Handler(){
+void Error_Handler(void){
 	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
 	while(true){
 	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
@@ -69,14 +97,14 @@ void Error_Handler(){
 
 
 //-------UART Interrupt Service Routine-----------
-void USART2_IRQHandler(){
+void USART2_IRQHandler(void){
 
 	//Reception
 	if (((uartHandle.Instance -> SR & USART_SR_RXNE) !=0 ) && (uartHandle.Instance -> CR1 & USART_CR1_RXNEIE) !=0){
-		RXbuffer.data[RXbuffer.putIndex] = uartHandle.Instance -> DR; 
+		RXbuffer.data[RXbuffer.putIndex] = uartHandle.Instance -> DR;
 		RXbuffer.putIndex++;
-		
-		
+
+
 		//buffer wrap around
 		if (RXbuffer.putIndex == BUFFER_SIZE){
 			RXbuffer.putIndex = 0;
@@ -86,10 +114,9 @@ void USART2_IRQHandler(){
 
 	}
 
-
 	//Transmission
 	if (((uartHandle.Instance -> SR & USART_SR_TXE) != 0) && ((uartHandle.Instance -> CR1 & USART_CR1_TXEIE) !=0 )){
-		
+
 		//Check if any data is present in the buffer
 		if (TXbuffer.nChars == 0){
 			uartHandle.Instance -> CR1 &= ~(USART_CR1_TXEIE);
@@ -99,7 +126,7 @@ void USART2_IRQHandler(){
 		uartHandle.Instance -> DR = TXbuffer.data[TXbuffer.getIndex];
 
 		TXbuffer.getIndex++;
-		
+
 		//buffer wrap around
 		if (TXbuffer.getIndex == BUFFER_SIZE){
 			TXbuffer.getIndex = 0;
@@ -113,8 +140,45 @@ void USART2_IRQHandler(){
 
 }
 
-//transfers the data between buffers buffers
-void TransferChar(){
+//handle and clear the EXTI interrupt
+void EXTI15_10_IRQHandler(void){
+	if ((EXTI -> PR & EXTI_PR_PR13)!=0){
+		EXTI -> PR = EXTI_PR_PR13; 
+		counter++;
+		mode = counter%2;
+
+	}
+
+}
+
+//send the single character
+void myPutChar(char ch){
+	while(TXbuffer.nChars == BUFFER_SIZE)continue;
+
+	TXbuffer.data[TXbuffer.putIndex] = ch;
+	TXbuffer.putIndex++;
+
+	if(TXbuffer.putIndex == BUFFER_SIZE){
+		TXbuffer.putIndex = 0;
+	}
+
+	uartHandle.Instance -> CR1 &= ~(USART_CR1_TXEIE);
+	TXbuffer.nChars++;
+	uartHandle.Instance -> CR1 |= USART_CR1_TXEIE;
+
+
+}
+
+//send the full message utilizing the myPuts function
+void myPuts(char* text){
+
+	for(;*text != '\0'; text++){
+		myPutChar(*text);
+	}
+}
+
+//transfers the data between buffers
+void TransferChar(void){
 
 	char ch = RXbuffer.data[RXbuffer.getIndex];
 
@@ -151,11 +215,21 @@ int main(void)
 	HAL_Init();
 	SystemClock_Config();
 	UART2_Init();
+	Button_Init();
+	EXTI_Configuration();
 	NVIC_EnableIRQ(USART2_IRQn);
+	mode = counter%2;
+
 
 	while (1)
 	{
 
+		switch(mode){
+		case 1: //Echo mode
+			TXbuffer = (struct cicrularBuffer){0};
+			myPuts("Echo mode enabled, type in to send the message!\r\n");
+
+		while(mode == 1){
 		//It the Txbuffer is not empty, enable interrupts
 		if (TXbuffer.nChars > 0){
 			if((uartHandle.Instance -> CR1 & USART_CR1_TXEIE)==0){
@@ -172,7 +246,7 @@ int main(void)
 		}else{
 
 			//Handle the RXbuffer overflow,
-			if(RXbuffer.nChars == BUFFER_OVERFLOW_CONTROL){
+			if(RXbuffer.nChars >= BUFFER_OVERFLOW_CONTROL){
 
 
 				//If the buffer overflow, wait for the TX register to empty and send a signal to stop the tramismission
@@ -197,7 +271,7 @@ int main(void)
 				}
 
 				uartHandle.Instance -> CR1 &= ~(USART_CR1_TXEIE);
-				
+
 				//After both buffers are ready to operate normally, sent the signal to renew the transmission
 				while((uartHandle.Instance -> SR & USART_SR_TXE) == 0) continue;
 				uartHandle.Instance -> DR = 0x11;
@@ -208,9 +282,28 @@ int main(void)
 
 			TransferChar();
 		}
-	}
-}
+		}
 
+
+		break;
+
+		case 0: // auto mode
+			TXbuffer = (struct cicrularBuffer){0};
+			myPuts("Switching to auto mode...\r\n");
+			HAL_Delay(1000);
+			while(mode == 0 ){
+				myPuts("Hello, from auto mode\r\n");
+				HAL_Delay(500);
+			}
+
+		break;
+
+
+
+		}
+
+}
+}
 
 void SystemClock_Config(void)
 {
